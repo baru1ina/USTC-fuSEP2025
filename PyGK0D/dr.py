@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 @njit(complex128(complex128, float64, float64, float64, float64, float64, float64, float64))
-def integrand_numba(w, x, y, wd, kapn, kapt, kz, jv_val):
+def integrand(w, x, y, wd, kapn, kapt, kz, jv_val):
     y_abs = np.abs(y)
     denominator = w - kz * x - wd * (x ** 2 + y_abs ** 2 / 2)
 
@@ -57,16 +57,6 @@ def integrand_numba(w, x, y, wd, kapn, kapt, kz, jv_val):
 
 
 def fun_entropy_dr(w, k, wd, kapn, kapt, kz=0.0, tol=1e-6, xmax=10.0, ymax=10.0):
-    """
-    Параметры:
-        w - комплексная частота (или массив частот)
-        k - волновое число
-        wd - частота дрейфа
-        kapn, kapt - параметры
-        kz - продольное волновое число (по умолчанию 0)
-        tol - точность интегрирования
-        xmax, ymax - пределы интегрирования
-    """
 
     if kz == 0:
         xmin, ymin = 0.0, 0.0
@@ -83,7 +73,7 @@ def fun_entropy_dr(w, k, wd, kapn, kapt, kz=0.0, tol=1e-6, xmax=10.0, ymax=10.0)
 
         def integrand_wrapper(y, x):
             jv_val = jv(0, k * np.abs(y))
-            return integrand_numba(w_val, x, y, wd, kapn, kapt, kz, jv_val)
+            return integrand(w_val, x, y, wd, kapn, kapt, kz, jv_val)
 
         # Разделяем на реальную и мнимую части
         def real_part(y, x):

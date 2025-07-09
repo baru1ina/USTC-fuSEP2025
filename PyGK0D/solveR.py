@@ -68,7 +68,9 @@ def solve_entropy_mode():
     plt.title(params)
 
     plt.tight_layout()
+    plt.savefig(f'rezults/disp_relation_epsn={epsn},tau={tau},kz={kz}.png')
     plt.show()
+
 
     return kk, wk, runtime
 
