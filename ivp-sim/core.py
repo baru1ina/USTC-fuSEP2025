@@ -23,7 +23,7 @@ class IVPModel:
             ky,
             wr,
             wi,
-            tau: float,
+            tau: float = 1.0,
             f_trap: float = 1.0,
             epsn: float = 0.2,
             kz: float = 0.0,
@@ -74,6 +74,8 @@ class IVPModel:
         self.vymax = float(vymax)
         self.vymin = float(vymin)
         self.vxmin = float(vxmin)
+
+        # self.nt =None
 
         # Derived parameters
         self.kapn: Optional[float] = None  # Normalized density gradient
@@ -177,8 +179,12 @@ class IVPModel:
         self._precompute_operators()
         self._init_g()
 
-    def run(self, nt: int = 500, *, plot_results: bool = True, real_time_plot: bool = False, rk: int = 1) -> Tuple[
-        np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    def run(self,
+            nt: int = 500,
+            *,
+            plot_results: bool = True,
+            real_time_plot: bool = False,
+            rk: int = 1) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
         """
         Run the time integration for the specified number of time steps.
 
@@ -323,7 +329,7 @@ class IVPModel:
                 plt.plot([t1, t2], [y1, y2], "r*--", linewidth=2)
                 title = f"(b) $\\omega$={omega:.3f}, $\\gamma$={gamma:.3f}, nw={int(nw)}"
             else:
-                title = f"(b) estimation not available"
+                title = f"(b) estimation not available? moderate nt"
             plt.title(title)
             plt.xlabel(f"$\\omega^T$ = {self.wr + 1j * self.wi}")
 
@@ -346,49 +352,6 @@ class IVPModel:
             plt.close()
 
         return float(gamma), float(omega)
-
-    @staticmethod
-    def from_data_create(
-            *,
-            ky,
-            wr,
-            wi,
-            tau: float = 1.0,
-            f_trap: float = 1.0,
-            epsn: float = 0.2,
-            kz: float = 0.0,
-            kapt: float = 0.5,
-            nvx: int = 32,
-            nvy: int = 64,
-            dt: float = 0.02,
-            vxmax: float = 5.0,
-            vymax: float = 5.0,
-            vymin: float = 0.0,
-            vxmin: float = -5.0,
-    ) -> "IVPModel":
-        """
-        Static method to create an IVPModel instance with default parameters.
-
-        Returns:
-            IVPModel instance
-        """
-        return IVPModel(
-            ky=ky,
-            wr=wr,
-            wi=wi,
-            tau=tau,
-            f_trap=f_trap,
-            epsn=epsn,
-            kz=kz,
-            kapt=kapt,
-            nvx=nvx,
-            nvy=nvy,
-            dt=dt,
-            vxmax=vxmax,
-            vymax=vymax,
-            vymin=vymin,
-            vxmin=vxmin,
-        )
 
 
 @njit(cache=True, fastmath=True)
@@ -607,57 +570,6 @@ def compute_gamma_omega_numba(lndEr, dt):
     return gammas_, omega, t1, t2, y1, y2, nw
 
 
-def run(
-        ky,
-        wr,
-        wi,
-        nt: int = 500,
-        plot_results: bool = True,
-        real_time_plot: bool = False,
-        f_trap: float = 1.0,
-        epsn: float = 0.2,
-        kz: float = 0.0,
-        kapt: float = 0.5
-):
-    """
-    Convenience function to create and run an IVPModel simulation.
-
-    Args:
-        ky: Perpendicular wave number
-        wr: Real part of complex frequency
-        wi: Imaginary part of complex frequency
-        nt: Number of time steps
-        plot_results: Whether to plot results
-        real_time_plot: Whether to show real-time plotting
-        f_trap: Trapped electron fraction
-        epsn: Normalized density gradient
-        kz: Parallel wave number
-        kapt: Normalized temperature gradient
-
-    Returns:
-        Simulation results
-    """
-    model = IVPModel.from_data_create(
-        ky=ky,
-        wr=wr,
-        wi=wi,
-        tau=1.0,
-        f_trap=f_trap,
-        epsn=epsn,
-        kz=kz,
-        kapt=kapt,
-        nvx=32,
-        nvy=64,
-        dt=0.02,
-        vxmax=5.0,
-        vymax=5.0,
-        vymin=0.0,
-        vxmin=-5.0,
-    )
-    phit, gi, ge, runtime, gamma, omega_r = model.run(nt=nt, plot_results=plot_results, real_time_plot=real_time_plot,
-                                                      rk=1)
-    return phit, gi, ge, runtime, gamma, omega_r
-
 
 if __name__ == "__main__":
     data = np.array(
@@ -675,6 +587,6 @@ if __name__ == "__main__":
     wr = float(np.real(data[id, 1]))
     wi = float(np.imag(data[id, 1]))
 
-    model = IVPModel.from_data_create(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5)
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5)
     phit, gi, ge, runtime, gamma, omega_r = model.run(nt=500, plot_results=True, real_time_plot=False)
     print(f"runtime={runtime:.2f}s, gamma={gamma:.3f}, omega_r={omega_r:.3f}")

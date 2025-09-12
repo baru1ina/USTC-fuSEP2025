@@ -1,30 +1,56 @@
 import numpy as np
-from core import run
+from core import IVPModel
 
 from utils import compute_Fp
 from plotting import plot_results, plot_gamma_vs_kz, plot_gamma_vs_ftrap
 
-def scan_gamma_vs_kz(ftrap_vals, ky,
-        wr,
-        wi, epsn=0.2, kapt=0.5, kz_vals=np.linspace(0.0, 1.0, 11)):
+
+def scan_gamma_vs_kz(ky,
+                     wr,
+                     wi,
+                     tau,
+                     epsn=0.2,
+                     kapt=0.5,
+                     ftrap_vals=None,
+                     kz_vals=np.linspace(0.0, 1.0, 11),
+                     nt=500):
+
+    if ftrap_vals is None:
+        ftrap_vals = [0.0, 0.5, 1.0]
+
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=tau, epsn=epsn, kapt=kapt)
+
     rez = []
-    for ftrap in ftrap_vals:
+    for f_trap in ftrap_vals:
         gamma_vals = []
+        model.f_trap = f_trap
         for kz in kz_vals:
-            print(f"Running: kz = {kz:.3f}, f_trap = {ftrap}")
-            _, _, _, _, gamma, omega = run(ky=ky, wr=wr, wi=wi, nt=500, epsn=epsn, kapt=kapt, kz=kz, f_trap=ftrap, plot_results=True)
+            print(f"Running: kz = {kz:.3f}, f_trap = {f_trap:.3f}")
+            model.kz = kz
+            model.initialize()
+            _, _, _, _, gamma, omega = model.run(nt=nt, plot_results=False)
             gamma_vals.append(gamma)
         rez.append(gamma_vals)
     return kz_vals, rez, ftrap_vals
 
 
 def scan_gamma_vs_ftrap(ky,
-        wr,
-        wi, epsn=0.2, kapt=0.5, kz=0.0, ftrap_vals=np.linspace(0.0, 1.0, 11)):
+                        wr,
+                        wi,
+                        tau,
+                        epsn=0.2,
+                        kapt=0.5,
+                        kz=0.0,
+                        ftrap_vals=np.linspace(0.0, 1.0, 11),
+                        nt=500):
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=tau, epsn=epsn, kapt=kapt, kz=kz)
+
     gamma_vals = []
     for f_trap in ftrap_vals:
         print(f"Running: f_trap = {f_trap:.3f}, kz = {kz}")
-        _, _, _, _, gamma, omega = run(ky=ky, wr=wr, wi=wi, nt=500, epsn=epsn, kapt=kapt, kz=kz, f_trap=f_trap, plot_results=True)
+        model.f_trap = f_trap
+        model.initialize()
+        _, _, _, _, gamma, omega = model.run(nt=nt, plot_results=False)
         gamma_vals.append(gamma)
     return ftrap_vals, gamma_vals
 
@@ -45,21 +71,31 @@ def main():
     wr = float(np.real(data[id, 1]))
     wi = float(np.imag(data[id, 1]))
 
-
     f_trap_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     kapts = np.linspace(0, 10, 10)
     epsns = np.linspace(0.1, 1.0, 10)
 
+    tau = 1.0
+    nt = 500
+    kz = 0.0
+
     results = []
+
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=tau, epsn=epsns[0], kz=kz, kapt=kapts[0])
 
     for epsn_ in epsns:
         Fp_values = []
         gamma_for_epsn = []
 
+        model.epsn = epsn_
+
         for f_trap in f_trap_values:
             gamma_for_f_trap = []
+            model.f_trap = f_trap
             for kapt_ in kapts:
-                phit, gi, ge, runtime, gammas_, omega = run(ky=ky, wr=wr, wi=wi, kapt=kapt_, epsn=epsn_, f_trap=f_trap, plot_results=True)
+                model.kapt = kapt_
+                model.initialize()
+                phit, gi, ge, runtime, gammas_, omega = model.run(nt=nt, plot_results=True)
                 gamma_for_f_trap.append(gammas_)
             gamma_for_epsn.append(gamma_for_f_trap)
 
@@ -75,7 +111,7 @@ def main():
 
     for result in results:
         plot_results(Fp_values=result['Fp_values'], gamma_values_list=result['gamma_values'],
-            param_list=f_trap_values, epsn=result['epsn'], param_name="f_trap")
+                     param_list=f_trap_values, epsn=result['epsn'], param_name="f_trap")
 
 
 def main2():
@@ -94,22 +130,26 @@ def main2():
     wr = float(np.real(data[id, 1]))
     wi = float(np.imag(data[id, 1]))
 
-
     epsn = 0.2
     kapt = 0.5
+    tau = 1.0
+    nt = 500
 
     N = 3
-
     kz_vals = np.linspace(0.0, 0.4, N)
     ftrap_vals = np.linspace(0.0, 1.0, N)
 
-    gamma_kz = scan_gamma_vs_kz(ky=ky, wr=wr, wi=wi, epsn=epsn, ftrap_vals=ftrap_vals, kapt=kapt, kz_vals=kz_vals)
+    gamma_kz = scan_gamma_vs_kz(ky=ky, wr=wr, wi=wi, tau=tau,
+                                epsn=epsn, kapt=kapt,
+                                ftrap_vals=ftrap_vals, kz_vals=kz_vals, nt=nt)
     plot_gamma_vs_kz(*gamma_kz, epsn=epsn)
 
     # ftrap_vals = np.linspace(0.0, 1.0, 10)
-    # gamma_ftrap = scan_gamma_vs_ftrap(epsn=epsn, kapt=kapt, kz=0.1, ftrap_vals=ftrap_vals)
+    # gamma_ftrap = scan_gamma_vs_ftrap(ky=ky, wr=wr, wi=wi, tau=tau,
+    #                                   epsn=epsn, kapt=kapt, kz=0.1,
+    #                                   ftrap_vals=ftrap_vals, nt=nt)
     # plot_gamma_vs_ftrap(*gamma_ftrap, epsn=epsn, kz=0.1)
 
 
 if __name__ == "__main__":
-    main2()
+    main()
