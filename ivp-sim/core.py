@@ -6,7 +6,19 @@ import math
 from numba import njit
 from typing import Tuple, Optional
 
-from utils import safe_log
+@njit('float64[:](float64[:])')
+def safe_log(x):
+    x = np.asarray(x)
+    x_safe = np.where(x <= 0, 1e-20, x)
+    return np.log(x_safe)
+
+
+@njit
+def compute_Fp(epsn, kapt):
+    kapn = 1 / epsn
+    Fp = kapn / (kapn + kapt)
+    return Fp
+
 
 mi = 1836.0
 
@@ -15,8 +27,8 @@ class IVPModel:
     """
     Initial Value Problem Model for plasma physics simulations.
     Solves the gyrokinetic equations for trapped electron modes.
+    Includes fast-ion (resonant) contribution.
     """
-
     def __init__(
             self,
             *,
@@ -34,7 +46,11 @@ class IVPModel:
             vxmax: float = 5.0,
             vymax: float = 5.0,
             vymin: float = 0.0,
-            vxmin: float = -5.0
+            vxmin: float = -5.0,
+            # FAST IONS
+            f_fast: float = 0.0,       # fast-ion density fraction (n_fast / n_total)
+            tau_f: float = 12.0,      # T_fast / T_e
+            eta_f: float = 1.0        # Ln/LT ratio for fast ions (controls drive)
     ) -> None:
         """
         Initialize the IVP model with physical and numerical parameters.
@@ -66,6 +82,11 @@ class IVPModel:
         self.kapt = float(kapt)
         self.f_trap = float(f_trap)
 
+        # FAST IONS
+        self.f_fast = float(f_fast)   # fast ion fraction
+        self.tau_f = float(tau_f)     # T_fast / T_e
+        self.eta_f = float(eta_f)     # eta (L_n/L_T) for fast ions
+
         # Numerical parameters
         self.nvx = int(nvx)
         self.nvy = int(nvy)
@@ -74,8 +95,6 @@ class IVPModel:
         self.vymax = float(vymax)
         self.vymin = float(vymin)
         self.vxmin = float(vxmin)
-
-        # self.nt =None
 
         # Derived parameters
         self.kapn: Optional[float] = None  # Normalized density gradient
@@ -95,7 +114,7 @@ class IVPModel:
         self.vy_grid = None  # 2D perpendicular velocity grid
         self.J0ki2 = None  # Squared Bessel function for ions
         self.J0ke2 = None  # Squared Bessel function for electrons
-        self.F0 = None  # Maxwellian distribution function
+        self.F0 = None  # Maxwellian distribution function for bulk
         self.wDiv = None  # Ion drift frequency operator
         self.wTiv = None  # Ion temperature gradient operator
         self.wDev = None  # Electron drift frequency operator
@@ -103,9 +122,16 @@ class IVPModel:
         self.dvx = None  # Parallel velocity grid spacing
         self.dvy = None  # Perpendicular velocity grid spacing
 
+        # FAST IONS
+        self.wFv = None
+        self.wTFv = None
+        self.J0kf2 = None
+        self.F0f = None
+
         # Distribution functions and potential
         self.gi = None  # Ion distribution function perturbation
         self.ge = None  # Electron distribution function perturbation
+        self.gf = None  # FAST IONS: fast-ion perturbation
         self.phit = None  # Time history of electrostatic potential
         self.runtime = None  # Computational runtime
 
@@ -162,6 +188,22 @@ class IVPModel:
 
         self.F0 = np.exp(-0.5 * (vx ** 2 + vy ** 2))
 
+        # FAST IONS
+        # We represent fast ions on the same vx,vy grid but with temperature scaling tau_f.
+        # Fast-ion drift frequency and gradient-operator are scaled with tau_f and eta_f.
+        # This is a practical reduced-model embedding of the resonant effect.
+        # NOTE: wFv is kept real-like (drift frequency operator); resonance handled via regularization later.
+        self.wFv = self.ky * (vx ** 2 + vy ** 2 / 2.0) / self.tau_f + self.kz * vx
+        # wTFv acts like the "temperature-gradient" driven operator for fast ions (re-using kapn/kapt scaled by eta_f)
+        # This is a modeling choice consistent with the article's reduced-Vlasov form for drive.
+        self.wTFv = self.ky * (self.kapn + (0.5 * (vx ** 2 + vy ** 2) - 1.5) * (self.kapt / max(1e-12, self.eta_f)))
+        # Bessel for fast ions: characteristic k_perp for fast species scales with sqrt(tau_f*mi) (approx.)
+        # Using same ky but scaled to mimic Larmor radius differences (reduced model)
+        k_fast = self.ky / np.sqrt(self.tau_f * mi + 1e-12)
+        self.J0kf2 = jv(0, k_fast * vy) ** 2
+        # Maxwellian for fast ions with T_f: scale exponent by tau_f
+        self.F0f = np.exp(-0.5 * (vx ** 2 + vy ** 2) / max(1e-12, self.tau_f))
+
     def _init_g(self) -> None:
         """
         Initialize the distribution function perturbations with small noise.
@@ -169,6 +211,9 @@ class IVPModel:
         base = (0.001 * self.F0).astype(np.complex128)
         self.gi = base.copy()
         self.ge = base.copy()
+        # FAST IONS
+        # Fast-ion perturbation initialised similarly using F0f
+        self.gf = (0.001 * self.F0f).astype(np.complex128)
 
     def initialize(self) -> None:
         """
@@ -188,12 +233,6 @@ class IVPModel:
         """
         Run the time integration for the specified number of time steps.
 
-        Args:
-            nt: Number of time steps
-            plot_results: Whether to plot results after simulation
-            real_time_plot: Whether to show real-time plotting during simulation
-            rk: Runge-Kutta order (0 for Euler, 1 for RK4)
-
         Returns:
             Tuple containing potential history, distribution functions, runtime, growth rate, and frequency
         """
@@ -204,12 +243,14 @@ class IVPModel:
 
         runtime_start = time.time()
 
+        # pass wr, wi down to integrator to use for resonance regularization
         if real_time_plot:
             plt.figure(1, figsize=(12, 6))
             for it in range(nt):
-                self.gi, self.ge, phit_tmp = integrate_rk4_core(
+                self.gi, self.ge, self.gf, phit_tmp = integrate_rk4_core(
                     self.gi,
                     self.ge,
+                    self.gf,  # FAST IONS
                     self.phit,
                     nt,
                     self.dt,
@@ -217,15 +258,23 @@ class IVPModel:
                     self.wTiv,
                     self.wDev,
                     self.wTev,
+                    self.wFv,    # FAST IONS
+                    self.wTFv,   # FAST IONS
                     self.J0ki2,
                     self.J0ke2,
+                    self.J0kf2,  # FAST IONS
                     self.F0,
+                    self.F0f,    # FAST IONS
                     self.vy_grid,
                     self.dvx,
                     self.dvy,
                     self.G0coef,
                     self.f_trap,
+                    self.f_fast,  # FAST IONS
                     self.tau,
+                    self.tau_f,   # FAST IONS
+                    self.wr,      # FAST IONS: pass wr, wi for resonance regularization
+                    self.wi,
                     rk,
                     single_step=True,
                 )
@@ -262,9 +311,10 @@ class IVPModel:
                     plt.draw()
                     plt.pause(0.01)
         else:
-            self.gi, self.ge, self.phit = integrate_rk4_core(
+            self.gi, self.ge, self.gf, self.phit = integrate_rk4_core(
                 self.gi,
                 self.ge,
+                self.gf,  # FAST IONS
                 self.phit,
                 nt,
                 self.dt,
@@ -272,15 +322,23 @@ class IVPModel:
                 self.wTiv,
                 self.wDev,
                 self.wTev,
+                self.wFv,    # FAST IONS
+                self.wTFv,   # FAST IONS
                 self.J0ki2,
                 self.J0ke2,
+                self.J0kf2,  # FAST IONS
                 self.F0,
+                self.F0f,    # FAST IONS
                 self.vy_grid,
                 self.dvx,
                 self.dvy,
                 self.G0coef,
                 self.f_trap,
+                self.f_fast,  # FAST IONS
                 self.tau,
+                self.tau_f,   # FAST IONS
+                self.wr,
+                self.wi,
                 rk,
                 single_step=False,
             )
@@ -294,9 +352,6 @@ class IVPModel:
         """
         Analyze simulation results to extract growth rate and frequency.
         Optionally plots the results.
-
-        Args:
-            plot: Whether to create summary plots
 
         Returns:
             Tuple of (growth rate, real frequency)
@@ -345,6 +400,7 @@ class IVPModel:
             plt.colorbar()
             plt.xlabel("$v_{||}$")
             plt.ylabel("$v_\\perp$")
+
             plt.title(f"(d) Im $g_i$, vxmax={self.vxmax}, vymax={self.vymax}")
 
             plt.tight_layout()
@@ -358,6 +414,7 @@ class IVPModel:
 def integrate_rk4_core(
         gi,
         ge,
+        gf,                # FAST IONS
         phit,
         nt,
         dt,
@@ -365,56 +422,51 @@ def integrate_rk4_core(
         wTiv,
         wDev,
         wTev,
+        wFv,               # FAST IONS
+        wTFv,              # FAST IONS
         J0ki2,
         J0ke2,
+        J0kf2,             # FAST IONS
         F0,
+        F0f,               # FAST IONS
         vy,
         dvx,
         dvy,
         G0coef,
         f_trap,
+        f_fast,            # FAST IONS
         tau,
+        tau_f,             # FAST IONS
+        wr,
+        wi,
         rk,
         single_step=False,
 ):
     """
     Core integration function using either Euler or RK4 method.
-    Numba-accelerated for performance.
-
-    Args:
-        gi: Ion distribution function perturbation
-        ge: Electron distribution function perturbation
-        phit: Electrostatic potential array
-        nt: Number of time steps
-        dt: Time step size
-        wDiv: Ion drift frequency operator
-        wTiv: Ion temperature gradient operator
-        wDev: Electron drift frequency operator
-        wTev: Electron temperature gradient operator
-        J0ki2: Squared Bessel function for ions
-        J0ke2: Squared Bessel function for electrons
-        F0: Maxwellian distribution
-        vy: Perpendicular velocity grid
-        dvx: Parallel velocity grid spacing
-        dvy: Perpendicular velocity grid spacing
-        G0coef: Field equation coefficient
-        f_trap: Trapped electron fraction
-        tau: Temperature ratio
-        rk: Integration method (0=Euler, 1=RK4)
-        single_step: Whether to perform single step or full integration
-
-    Returns:
-        Updated distribution functions and potential
+    Now includes fast-ion dynamics and a resonance regularization to avoid division-by-zero in F1-like responses.
     """
     phi_local = 0.0 + 0.0j
+
+    # resonance regularization parameter: small frequency width to avoid singular denominator
+    # choose a floor to prevent zero; scaled by imaginary part of target mode if present
+    omega_reg = max(1e-6, abs(wi) * 0.1)
 
     if single_step:
         phit_tmp = np.zeros(1, dtype=np.complex128)
 
         if rk == 0:
-            phi_local = G0coef * np.sum((gi + f_trap * ge / tau) * vy) * dvx * dvy
+            # Euler method
+            # compute a weight for fast-ions to regularize resonant enhancement:
+            # fast_weight = 1/(1 + ((wr - wFv)/omega_reg)^2)  (Lorentz-like smoothing)
+            fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+
+            phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+
             gi[:] = gi - 1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0)) * dt
             ge[:] = ge - 1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0)) * dt
+            # FAST IONS
+            gf[:] = gf - 1j * (wFv * gf + (wFv - wTFv) * phi_local * (J0kf2 * F0f)) * dt
 
             gi[:, 0] = 0.0 + 0.0j
             gi[:, -1] = 0.0 + 0.0j
@@ -424,47 +476,72 @@ def integrate_rk4_core(
             ge[:, -1] = 0.0 + 0.0j
             ge[0, :] = 0.0 + 0.0j
             ge[-1, :] = 0.0 + 0.0j
+            gf[:, 0] = 0.0 + 0.0j
+            gf[:, -1] = 0.0 + 0.0j
+            gf[0, :] = 0.0 + 0.0j
+            gf[-1, :] = 0.0 + 0.0j
         else:
-            # RK4 method integration
+            # RK4 method
+            # step 1
             dgi1 = -1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0))
             dge1 = -1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0))
+            dgf1 = -1j * (wFv * gf + (wFv - wTFv) * phi_local * (J0kf2 * F0f))
 
             gitmp = gi + 0.5 * dt * dgi1
             getmp = ge + 0.5 * dt * dge1
-            phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+            gftmp = gf + 0.5 * dt * dgf1
 
+            fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+
+            # step 2
             dgi2 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
             dge2 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+            dgf2 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
             gitmp = gi + 0.5 * dt * dgi2
             getmp = ge + 0.5 * dt * dge2
-            phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+            gftmp = gf + 0.5 * dt * dgf2
 
+            fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+
+            # step 3
             dgi3 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
             dge3 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+            dgf3 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
             gitmp = gi + dt * dgi3
             getmp = ge + dt * dge3
-            phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+            gftmp = gf + dt * dgf3
 
+            fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+
+            # step 4
             dgi4 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
             dge4 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+            dgf4 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
             gi[:] = gi + dt / 6.0 * (dgi1 + 2.0 * dgi2 + 2.0 * dgi3 + dgi4)
             ge[:] = ge + dt / 6.0 * (dge1 + 2.0 * dge2 + 2.0 * dge3 + dge4)
+            gf[:] = gf + dt / 6.0 * (dgf1 + 2.0 * dgf2 + 2.0 * dgf3 + dgf4)
 
-            phi_local = G0coef * np.sum((gi + f_trap * ge / tau) * vy) * dvx * dvy
+            fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+            phi_local = G0coef * np.sum((gi + f_trap * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
 
         phit_tmp[0] = phi_local
-        return gi, ge, phit_tmp
+        return gi, ge, gf, phit_tmp
 
     else:
         for it in range(nt):
             if rk == 0:
                 # Euler method
-                phi_local = G0coef * np.sum((gi + f_trap * ge / tau) * vy) * dvx * dvy
+                fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+                phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
                 gi[:] = gi - 1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0)) * dt
                 ge[:] = ge - 1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0)) * dt
+                gf[:] = gf - 1j * (wFv * gf + (wFv - wTFv) * phi_local * (J0kf2 * F0f)) * dt
 
                 gi[:, 0] = 0.0 + 0.0j
                 gi[:, -1] = 0.0 + 0.0j
@@ -474,53 +551,62 @@ def integrate_rk4_core(
                 ge[:, -1] = 0.0 + 0.0j
                 ge[0, :] = 0.0 + 0.0j
                 ge[-1, :] = 0.0 + 0.0j
+                gf[:, 0] = 0.0 + 0.0j
+                gf[:, -1] = 0.0 + 0.0j
+                gf[0, :] = 0.0 + 0.0j
+                gf[-1, :] = 0.0 + 0.0j
             else:
                 # RK4 method
                 dgi1 = -1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0))
                 dge1 = -1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0))
+                dgf1 = -1j * (wFv * gf + (wFv - wTFv) * phi_local * (J0kf2 * F0f))
 
                 gitmp = gi + 0.5 * dt * dgi1
                 getmp = ge + 0.5 * dt * dge1
-                phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+                gftmp = gf + 0.5 * dt * dgf1
+                fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi2 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge2 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+                dgf2 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
                 gitmp = gi + 0.5 * dt * dgi2
                 getmp = ge + 0.5 * dt * dge2
-                phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+                gftmp = gf + 0.5 * dt * dgf2
+                fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi3 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge3 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+                dgf3 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
                 gitmp = gi + dt * dgi3
                 getmp = ge + dt * dge3
-                phitmp = G0coef * np.sum((gitmp + f_trap * getmp / tau) * vy) * dvx * dvy
+                gftmp = gf + dt * dgf3
+                fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi4 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge4 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
+                dgf4 = -1j * (wFv * gftmp + (wFv - wTFv) * phitmp * (J0kf2 * F0f))
 
                 gi[:] = gi + dt / 6.0 * (dgi1 + 2.0 * dgi2 + 2.0 * dgi3 + dgi4)
                 ge[:] = ge + dt / 6.0 * (dge1 + 2.0 * dge2 + 2.0 * dge3 + dge4)
+                gf[:] = gf + dt / 6.0 * (dgf1 + 2.0 * dgf2 + 2.0 * dgf3 + dgf4)
 
-                phi_local = G0coef * np.sum((gi + f_trap * ge / tau) * vy) * dvx * dvy
+                fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
+                phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
 
             phit[it] = phi_local
 
-        return gi, ge, phit
+        return gi, ge, gf, phit
 
 
 @njit(cache=True)
 def compute_gamma_omega_numba(lndEr, dt):
     """
     Calculate growth rate and frequency from logarithmic amplitude data.
-
-    Args:
-        lndEr: Logarithm of the absolute value of real potential component
-        dt: Time step size
-
-    Returns:
-        Tuple containing growth rate, frequency, time points, amplitudes, and wave count
     """
     nt = lndEr.shape[0]
     it0 = int(nt * 5.8 / 20)
@@ -587,6 +673,7 @@ if __name__ == "__main__":
     wr = float(np.real(data[id, 1]))
     wi = float(np.imag(data[id, 1]))
 
-    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5)
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5, f_trap=0,
+                     f_fast=0.05, tau_f=12.0, eta_f=0.6)
     phit, gi, ge, runtime, gamma, omega_r = model.run(nt=500, plot_results=True, real_time_plot=False)
     print(f"runtime={runtime:.2f}s, gamma={gamma:.3f}, omega_r={omega_r:.3f}")
