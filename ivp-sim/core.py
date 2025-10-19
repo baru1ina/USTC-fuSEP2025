@@ -6,19 +6,7 @@ import math
 from numba import njit
 from typing import Tuple, Optional
 
-@njit('float64[:](float64[:])')
-def safe_log(x):
-    x = np.asarray(x)
-    x_safe = np.where(x <= 0, 1e-20, x)
-    return np.log(x_safe)
-
-
-@njit
-def compute_Fp(epsn, kapt):
-    kapn = 1 / epsn
-    Fp = kapn / (kapn + kapt)
-    return Fp
-
+from utils import safe_log, compute_Fp
 
 mi = 1836.0
 
@@ -197,8 +185,8 @@ class IVPModel:
         # wTFv acts like the "temperature-gradient" driven operator for fast ions (re-using kapn/kapt scaled by eta_f)
         # This is a modeling choice consistent with the article's reduced-Vlasov form for drive.
         self.wTFv = self.ky * (self.kapn + (0.5 * (vx ** 2 + vy ** 2) - 1.5) * (self.kapt / max(1e-12, self.eta_f)))
-        # Bessel for fast ions: characteristic k_perp for fast species scales with sqrt(tau_f*mi) (approx.)
-        # Using same ky but scaled to mimic Larmor radius differences (reduced model)
+        # Bessel for fast ions: characteristic k_perp for fast species scales with sqrt(tau_f*mi)
+        # Using same ky but scaled to mimic Larmor radius differences
         k_fast = self.ky / np.sqrt(self.tau_f * mi + 1e-12)
         self.J0kf2 = jv(0, k_fast * vy) ** 2
         # Maxwellian for fast ions with T_f: scale exponent by tau_f
@@ -212,7 +200,6 @@ class IVPModel:
         self.gi = base.copy()
         self.ge = base.copy()
         # FAST IONS
-        # Fast-ion perturbation initialised similarly using F0f
         self.gf = (0.001 * self.F0f).astype(np.complex128)
 
     def initialize(self) -> None:
@@ -243,7 +230,6 @@ class IVPModel:
 
         runtime_start = time.time()
 
-        # pass wr, wi down to integrator to use for resonance regularization
         if real_time_plot:
             plt.figure(1, figsize=(12, 6))
             for it in range(nt):
