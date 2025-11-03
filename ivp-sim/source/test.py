@@ -1,9 +1,8 @@
 import numpy as np
-from core import IVPModel
+from ..core import IVPModel
 
-from utils import compute_Fp
+from ..utils import compute_Fp
 from plotting import plot_results, plot_gamma_vs_kz, plot_gamma_vs_ftrap
-
 
 def scan_gamma_vs_kz(ky,
                      wr,

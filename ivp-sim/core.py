@@ -6,7 +6,7 @@ import math
 from numba import njit
 from typing import Tuple, Optional
 
-from utils import safe_log, compute_Fp
+from utils import safe_log
 
 mi = 1836.0
 
@@ -447,7 +447,8 @@ def integrate_rk4_core(
             # fast_weight = 1/(1 + ((wr - wFv)/omega_reg)^2)  (Lorentz-like smoothing)
             fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
 
-            phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+            # phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+            phi_local = G0coef * np.sum((gi + (f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
 
             gi[:] = gi - 1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0)) * dt
             ge[:] = ge - 1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0)) * dt
@@ -478,7 +479,8 @@ def integrate_rk4_core(
             gftmp = gf + 0.5 * dt * dgf1
 
             fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
             # step 2
             dgi2 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
@@ -490,7 +492,8 @@ def integrate_rk4_core(
             gftmp = gf + 0.5 * dt * dgf2
 
             fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
             # step 3
             dgi3 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
@@ -502,7 +505,8 @@ def integrate_rk4_core(
             gftmp = gf + dt * dgf3
 
             fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-            phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+            phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
             # step 4
             dgi4 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
@@ -524,7 +528,8 @@ def integrate_rk4_core(
             if rk == 0:
                 # Euler method
                 fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-                phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+                # phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+                phi_local = G0coef * np.sum((gi + (f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
                 gi[:] = gi - 1j * (wDiv * gi + (wDiv - wTiv) * phi_local * (J0ki2 * F0)) * dt
                 ge[:] = ge - 1j * (wDev * ge + (wDev - wTev) * phi_local * (J0ke2 * F0)) * dt
                 gf[:] = gf - 1j * (wFv * gf + (wFv - wTFv) * phi_local * (J0kf2 * F0f)) * dt
@@ -551,7 +556,8 @@ def integrate_rk4_core(
                 getmp = ge + 0.5 * dt * dge1
                 gftmp = gf + 0.5 * dt * dgf1
                 fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi2 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge2 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
@@ -561,7 +567,8 @@ def integrate_rk4_core(
                 getmp = ge + 0.5 * dt * dge2
                 gftmp = gf + 0.5 * dt * dgf2
                 fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi3 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge3 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
@@ -571,7 +578,8 @@ def integrate_rk4_core(
                 getmp = ge + dt * dge3
                 gftmp = gf + dt * dgf3
                 fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-                phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                # phitmp = G0coef * np.sum((gitmp + (1 - f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
+                phitmp = G0coef * np.sum((gitmp + (f_trap) * getmp / tau + f_fast * gftmp / tau_f * fast_weight) * vy) * dvx * dvy
 
                 dgi4 = -1j * (wDiv * gitmp + (wDiv - wTiv) * phitmp * (J0ki2 * F0))
                 dge4 = -1j * (wDev * getmp + (wDev - wTev) * phitmp * (J0ke2 * F0))
@@ -582,7 +590,8 @@ def integrate_rk4_core(
                 gf[:] = gf + dt / 6.0 * (dgf1 + 2.0 * dgf2 + 2.0 * dgf3 + dgf4)
 
                 fast_weight = 1.0 / (1.0 + ((wr - wFv) / omega_reg) ** 2)
-                phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+                # phi_local = G0coef * np.sum((gi + (1 - f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
+                phi_local = G0coef * np.sum((gi + (f_trap) * ge / tau + f_fast * gf / tau_f * fast_weight) * vy) * dvx * dvy
 
             phit[it] = phi_local
 
@@ -659,7 +668,7 @@ if __name__ == "__main__":
     wr = float(np.real(data[id, 1]))
     wi = float(np.imag(data[id, 1]))
 
-    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5, f_trap=0,
+    model = IVPModel(ky=ky, wr=wr, wi=wi, tau=1.0, epsn=0.2, kz=0.0, kapt=0.5, f_trap=1.0,
                      f_fast=0.05, tau_f=12.0, eta_f=0.6)
     phit, gi, ge, runtime, gamma, omega_r = model.run(nt=500, plot_results=True, real_time_plot=False)
     print(f"runtime={runtime:.2f}s, gamma={gamma:.3f}, omega_r={omega_r:.3f}")
